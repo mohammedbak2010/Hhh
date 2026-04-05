@@ -20,36 +20,39 @@ local Lighting = game:GetService("Lighting")
 local LP = Players.LocalPlayer
 local Char, HRP, Hum
 
--- ========== [ حماية متطورة من الكشف ] ==========
-pcall(function()
-    local mt = getrawmetatable(game)
-    if mt then
-        local old_namecall = mt.__namecall
-        setreadonly(mt, false)
-        mt.__namecall = newcclosure(function(self, ...)
-            local method = getnamecallmethod()
-            if method == "Kick" or method == "kick" or (type(method) == "string" and method:lower():find("kick")) then
-                return nil
-            end
-            return old_namecall(self, ...)
-        end)
-        setreadonly(mt, true)
-    end
-end)
+-- ========== [ حماية ذكية من الكشف ] ==========
+-- منهج: نقلل بصمة السكريبت بدل ما نحارب الـ anti-cheat مباشرة
 
-pcall(function()
-    game.Kick = function() end
-    if LP then LP.Kick = function() end end
-    local replicated = game:GetService("ReplicatedStorage")
-    for _, child in pairs(replicated:GetDescendants()) do
-        if child:IsA("RemoteEvent") then
-            local name = (child.Name or ""):lower()
-            if name:find("kick") or name:find("ban") or name:find("detect") or name:find("anticheat") then
-                child.FireServer = function() end
-            end
-        end
+-- 1. إخفاء velocity spikes: نحد السرعة بشكل تدريجي عشان ما يبدو مفاجئ
+local function clampedVelocity(hrp, velX, velY, velZ, maxSpd)
+    if not hrp then return end
+    local cur = hrp.AssemblyLinearVelocity
+    -- تدريجي: ما نغير بشكل مفاجئ أكثر من 80% من الفارق
+    local smoothX = cur.X + (velX - cur.X) * 0.85
+    local smoothZ = cur.Z + (velZ - cur.Z) * 0.85
+    local spd = math.sqrt(smoothX*smoothX + smoothZ*smoothZ)
+    if spd > maxSpd then
+        smoothX = smoothX / spd * maxSpd
+        smoothZ = smoothZ / spd * maxSpd
     end
-end)
+    hrp.AssemblyLinearVelocity = Vector3.new(smoothX, velY, smoothZ)
+end
+
+-- 2. حماية الـ GUI من الحذف (بسيطة، ما تلفت انتباه)
+local function protectGUI(guiObj)
+    pcall(function()
+        local function protectDescendant(obj)
+            local oldParent = obj.Parent
+            obj:GetPropertyChangedSignal("Parent"):Connect(function()
+                if obj.Parent ~= oldParent then
+                    task.defer(function() pcall(function() obj.Parent = oldParent end) end)
+                end
+            end)
+        end
+        protectDescendant(guiObj)
+        guiObj.DescendantAdded:Connect(protectDescendant)
+    end)
+end
 
 local function protectGUI(guiObj)
     pcall(function()
@@ -66,21 +69,7 @@ local function protectGUI(guiObj)
     end)
 end
 
-local lastPos, lastTime = nil, nil
-RunService.Heartbeat:Connect(function()
-    local char = LP.Character
-    if not char then return end
-    local root = char:FindFirstChild("HumanoidRootPart")
-    if not root then return end
-    local now, pos = tick(), root.Position
-    if lastPos and lastTime then
-        local delta = now - lastTime
-        if delta > 0 and (pos - lastPos).Magnitude / delta > 150 then
-            pcall(function() if root:GetNetworkOwner() == LP then root:SetNetworkOwner(nil) end end)
-        end
-    end
-    lastPos, lastTime = pos, now
-end)
+-- حماية الشبكة مُبسّطة (بدون velocity spike detection المكشوف)
 
 -- ========== [ الألوان ] ==========
 local Colors = {
@@ -177,7 +166,7 @@ local function setOnlyThisFeature(activeFeature)
 end
 
 -- ========== [ SPEED BOOST ] ==========
-local SpeedSettings = { NormalSpeed = 52, HoldingSpeed = 27 }
+local SpeedSettings = { NormalSpeed = 52, StealSpeed = 27 }
 local IsHoldingBrainrot = false
 local isSpeedBoostEnabled = false
 local speedConn = nil
@@ -221,7 +210,7 @@ local function startSpeedBoost()
         local hum = char:FindFirstChildOfClass("Humanoid")
         if not hrp or not hum then return end
         updateCarryStatus()
-        local targetSpeed = IsHoldingBrainrot and SpeedSettings.HoldingSpeed or SpeedSettings.NormalSpeed
+        local targetSpeed = IsHoldingBrainrot and SpeedSettings.StealSpeed or SpeedSettings.NormalSpeed
         local moveDir = hum.MoveDirection
         if moveDir.Magnitude > 0.1 then
             hrp.AssemblyLinearVelocity = Vector3.new(moveDir.X * targetSpeed, hrp.AssemblyLinearVelocity.Y, moveDir.Z * targetSpeed)
@@ -788,8 +777,9 @@ local function getWP(name)
 end
 
 -- ========== [ AUTO DUEL — نظام Heartbeat+Phase الشغال ] ==========
-local DUEL_APPROACH_SPD = 60
-local DUEL_RETURN_SPD   = 30
+-- Auto Duel يستخدم نفس سرعتي Speed Boost
+local function DUEL_APPROACH_SPD() return SpeedSettings.NormalSpeed end
+local function DUEL_RETURN_SPD()   return SpeedSettings.StealSpeed  end
 
 local aplConn, aprConn = nil, nil
 local aplPhase, aprPhase = 1, 1
@@ -809,7 +799,7 @@ local function MoveToPoint(hrp, targetPos, speed)
         return true
     end
     local direction = Vector3.new(targetPos.X - myPos.X, 0, targetPos.Z - myPos.Z).Unit
-    hrp.AssemblyLinearVelocity = Vector3.new(direction.X * speed, hrp.AssemblyLinearVelocity.Y, direction.Z * speed)
+    clampedVelocity(hrp, direction.X * speed, hrp.AssemblyLinearVelocity.Y, direction.Z * speed, speed)
     return false
 end
 
@@ -846,7 +836,7 @@ local function updateAutoPlayLeft()
     if not target then aplPhase = 1; return end
     local targetPos = getWP(target)
     if not targetPos then return end
-    local spd = (aplPhase <= 2) and DUEL_APPROACH_SPD or DUEL_RETURN_SPD
+    local spd = (aplPhase <= 2) and DUEL_APPROACH_SPD() or DUEL_RETURN_SPD()
     local reached = MoveToPoint(h, targetPos, spd)
     if reached then
         aplPhase = aplPhase + 1
@@ -865,7 +855,7 @@ local function updateAutoPlayRight()
     if not target then aprPhase = 1; return end
     local targetPos = getWP(target)
     if not targetPos then return end
-    local spd = (aprPhase <= 2) and DUEL_APPROACH_SPD or DUEL_RETURN_SPD
+    local spd = (aprPhase <= 2) and DUEL_APPROACH_SPD() or DUEL_RETURN_SPD()
     local reached = MoveToPoint(h, targetPos, spd)
     if reached then
         aprPhase = aprPhase + 1
@@ -1227,12 +1217,10 @@ local function Save()
         menuW = menuW,
         menuH = menuH,
         menuPos = menuPos,
-        DUEL_APPROACH_SPD = DUEL_APPROACH_SPD,
-        DUEL_RETURN_SPD = DUEL_RETURN_SPD,
         FloatHeight = FloatHeight,
         FloatUpSpeed = FloatUpSpeed,
         NormalSpeed = SpeedSettings.NormalSpeed,
-        HoldingSpeed = SpeedSettings.HoldingSpeed,
+        StealSpeed = SpeedSettings.StealSpeed,
         EnhancedGrab = {
             Radius = EnhancedGrab.Radius,
             Delay = EnhancedGrab.Delay,
@@ -1282,12 +1270,10 @@ local function Load()
     if d.SideButtonSize then SideButtonSize = d.SideButtonSize end
     if d.menuW then menuW = d.menuW end
     if d.menuH then menuH = d.menuH end
-    if d.DUEL_APPROACH_SPD then DUEL_APPROACH_SPD = d.DUEL_APPROACH_SPD end
-    if d.DUEL_RETURN_SPD then DUEL_RETURN_SPD = d.DUEL_RETURN_SPD end
     if d.FloatHeight then FloatHeight = d.FloatHeight end
     if d.FloatUpSpeed then FloatUpSpeed = math.clamp(d.FloatUpSpeed, 5, 125) end
     if d.NormalSpeed then SpeedSettings.NormalSpeed = d.NormalSpeed end
-    if d.HoldingSpeed then SpeedSettings.HoldingSpeed = d.HoldingSpeed end
+    if d.StealSpeed  then SpeedSettings.StealSpeed  = d.StealSpeed  end
     
     if d.EnhancedGrab then
         if d.EnhancedGrab.Radius then EnhancedGrab.Radius = math.clamp(d.EnhancedGrab.Radius, 5, 50) end
@@ -1341,13 +1327,13 @@ local function Load()
                 elseif id == "GrabDelay" then
                     boxRef.TextBox.Text = string.format("%.2f", EnhancedGrab.Delay)
                 elseif id == "DuelApproach" then
-                    boxRef.TextBox.Text = tostring(DUEL_APPROACH_SPD)
+                    boxRef.TextBox.Text = tostring(SpeedSettings.NormalSpeed)
                 elseif id == "DuelReturn" then
-                    boxRef.TextBox.Text = tostring(DUEL_RETURN_SPD)
+                    boxRef.TextBox.Text = tostring(SpeedSettings.StealSpeed)
                 elseif id == "NormalSpeed" then
                     boxRef.TextBox.Text = tostring(SpeedSettings.NormalSpeed)
-                elseif id == "HoldingSpeed" then
-                    boxRef.TextBox.Text = tostring(SpeedSettings.HoldingSpeed)
+                elseif id == "StealSpeed" then
+                    boxRef.TextBox.Text = tostring(SpeedSettings.StealSpeed)
                 elseif id == "FloatHeight" then
                     boxRef.TextBox.Text = tostring(FloatHeight)
                 elseif id == "FloatUpSpeed" then
@@ -1940,12 +1926,6 @@ ci = ci + 1
 MakeToggle(combat, "Auto Play Right", ci, function(s) if s then StartAutoPlayRight() else StopAutoPlayRight() end end, function() return State.AutoPlayRight end, "AutoPlayRight")
 ci = ci + 1
 
-MakeNumberBox(combat, "Duel Approach Spd", DUEL_APPROACH_SPD, ci, function(v) DUEL_APPROACH_SPD = math.clamp(v,1,300); Notify("Approach = "..DUEL_APPROACH_SPD) end, 1, 300, "DuelApproach")
-ci = ci + 1
-
-MakeNumberBox(combat, "Duel Return Spd", DUEL_RETURN_SPD, ci, function(v) DUEL_RETURN_SPD = math.clamp(v,1,300); Notify("Return = "..DUEL_RETURN_SPD) end, 1, 300, "DuelReturn")
-ci = ci + 1
-
 MakeToggle(combat, "Anti Sentry", ci, function(s) if s then StartAntiSentry() else StopAntiSentry() end end, function() return State.AntiSentry end, "AntiSentry")
 ci = ci + 1
 
@@ -1958,7 +1938,7 @@ ci = ci + 1
 MakeNumberBox(combat, "Normal Speed", SpeedSettings.NormalSpeed, ci, function(v) SpeedSettings.NormalSpeed = math.clamp(v,1,200); Notify("Normal Speed = "..SpeedSettings.NormalSpeed) end, 1, 200, "NormalSpeed")
 ci = ci + 1
 
-MakeNumberBox(combat, "Steal Speed (Brainrot)", SpeedSettings.HoldingSpeed, ci, function(v) SpeedSettings.HoldingSpeed = math.clamp(v,1,200); Notify("Steal Speed = "..SpeedSettings.HoldingSpeed) end, 1, 200, "HoldingSpeed")
+MakeNumberBox(combat, "Steal Speed", SpeedSettings.StealSpeed, ci, function(v) SpeedSettings.StealSpeed = math.clamp(v,1,200); Notify("Steal Speed = "..SpeedSettings.StealSpeed) end, 1, 200, "StealSpeed")
 ci = ci + 1
 
 -- ====== PROTECT TAB ======
