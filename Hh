@@ -1,0 +1,602 @@
+repeat task.wait() until game:IsLoaded()
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local UserInputService = game:GetService("UserInputService")
+local TweenService = game:GetService("TweenService")
+local LP = Players.LocalPlayer
+local Char, HRP, Hum
+
+-- إعداد الشخصية
+local function Setup(c)
+    Char = c
+    HRP = c:WaitForChild("HumanoidRootPart")
+    Hum = c:WaitForChild("Humanoid")
+    pcall(function() HRP:SetNetworkOwner(LP) end)
+end
+
+if LP.Character then Setup(LP.Character) end
+LP.CharacterAdded:Connect(Setup)
+
+-- ===== الإعدادات =====
+local GRAB_RATE = 0.12      -- سرعة السرقة (ثواني)
+local GRAB_RADIUS = 15       -- مدى السرقة
+local GRAB_ACTIVE = false    -- حالة التشغيل
+local grabTimer = 0
+local grabMainConn = nil
+local stealCache = {}
+local stealBarVisible = true
+
+-- ===== واجهة المستخدم =====
+local gui = Instance.new("ScreenGui")
+gui.Name = "AutoGrabProV3"
+gui.ResetOnSpawn = false
+gui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
+gui.Parent = LP:WaitForChild("PlayerGui")
+
+-- ===== الإطار الرئيسي (شريط التقدم) =====
+local stealBarFrame = Instance.new("Frame", gui)
+stealBarFrame.Name = "GrabBar"
+stealBarFrame.Size = UDim2.new(0, 420, 0, 60)
+stealBarFrame.Position = UDim2.new(0.5, -210, 1, -80)
+stealBarFrame.BackgroundColor3 = Color3.fromRGB(8, 0, 12)
+stealBarFrame.BackgroundTransparency = 0.1
+stealBarFrame.ZIndex = 8
+stealBarFrame.Active = true
+stealBarFrame.ClipsDescendants = true
+Instance.new("UICorner", stealBarFrame).CornerRadius = UDim.new(0, 14)
+
+-- Stroke متحرك
+local barStroke = Instance.new("UIStroke", stealBarFrame)
+barStroke.Color = Color3.fromRGB(255, 50, 50)
+barStroke.Thickness = 2
+barStroke.Transparency = 0.3
+
+-- Glow effect
+local glow = Instance.new("Frame", stealBarFrame)
+glow.Size = UDim2.new(1, 6, 1, 6)
+glow.Position = UDim2.new(0, -3, 0, -3)
+glow.BackgroundColor3 = Color3.fromRGB(255, 0, 50)
+glow.BackgroundTransparency = 0.85
+glow.ZIndex = 7
+Instance.new("UICorner", glow).CornerRadius = UDim.new(0, 16)
+
+-- أيقونة
+local iconLbl = Instance.new("TextLabel", stealBarFrame)
+iconLbl.Size = UDim2.new(0, 55, 1, 0)
+iconLbl.BackgroundTransparency = 1
+iconLbl.Text = "⚡"
+iconLbl.TextColor3 = Color3.fromRGB(255, 80, 80)
+iconLbl.Font = Enum.Font.GothamBold
+iconLbl.TextSize = 28
+iconLbl.ZIndex = 9
+
+-- نص GRAB
+local grabLbl = Instance.new("TextLabel", stealBarFrame)
+grabLbl.Size = UDim2.new(0, 60, 1, 0)
+grabLbl.Position = UDim2.new(0, 60, 0, 0)
+grabLbl.BackgroundTransparency = 1
+grabLbl.Text = "STEAL"
+grabLbl.TextColor3 = Color3.fromRGB(255, 220, 220)
+grabLbl.Font = Enum.Font.GothamBold
+grabLbl.TextSize = 15
+grabLbl.ZIndex = 9
+
+-- خلفية شريط التقدم
+local sbBG = Instance.new("Frame", stealBarFrame)
+sbBG.Size = UDim2.new(0, 180, 0, 30)
+sbBG.Position = UDim2.new(0, 125, 0.5, -15)
+sbBG.BackgroundColor3 = Color3.fromRGB(20, 0, 25)
+sbBG.ZIndex = 9
+Instance.new("UICorner", sbBG).CornerRadius = UDim.new(0, 8)
+
+-- شريط التقدم الرئيسي
+local sbFill = Instance.new("Frame", sbBG)
+sbFill.Size = UDim2.new(0, 0, 1, 0)
+sbFill.BackgroundColor3 = Color3.fromRGB(255, 50, 50)
+sbFill.ZIndex = 10
+Instance.new("UICorner", sbFill).CornerRadius = UDim.new(0, 8)
+
+-- نسبة السرقة (داخل الشريط)
+local sbPct = Instance.new("TextLabel", sbBG)
+sbPct.Size = UDim2.new(1, 0, 1, 0)
+sbPct.BackgroundTransparency = 1
+sbPct.Text = "0%"
+sbPct.TextColor3 = Color3.fromRGB(255, 255, 255)
+sbPct.Font = Enum.Font.GothamBold
+sbPct.TextSize = 13
+sbPct.ZIndex = 11
+
+-- إطار المعلومات (المدى والسرعة)
+local infoFrame = Instance.new("Frame", stealBarFrame)
+infoFrame.Size = UDim2.new(0, 130, 0, 20)
+infoFrame.Position = UDim2.new(0, 125, 1, -26)
+infoFrame.BackgroundTransparency = 1
+infoFrame.ZIndex = 9
+
+-- نص المدى
+local radiusText = Instance.new("TextLabel", infoFrame)
+radiusText.Size = UDim2.new(0.5, 0, 1, 0)
+radiusText.BackgroundTransparency = 1
+radiusText.Text = "📏 " .. GRAB_RADIUS .. "m"
+radiusText.TextColor3 = Color3.fromRGB(255, 180, 100)
+radiusText.Font = Enum.Font.GothamBold
+radiusText.TextSize = 10
+radiusText.ZIndex = 9
+
+-- نص السرعة
+local speedText = Instance.new("TextLabel", infoFrame)
+speedText.Size = UDim2.new(0.5, 0, 1, 0)
+speedText.Position = UDim2.new(0.5, 0, 0, 0)
+speedText.BackgroundTransparency = 1
+speedText.Text = "⚡" .. string.format("%.2f", GRAB_RATE) .. "s"
+speedText.TextColor3 = Color3.fromRGB(100, 255, 150)
+speedText.Font = Enum.Font.GothamBold
+speedText.TextSize = 10
+speedText.ZIndex = 9
+
+-- حالة التشغيل (نقطة)
+local statusDot = Instance.new("Frame", stealBarFrame)
+statusDot.Size = UDim2.new(0, 12, 0, 12)
+statusDot.Position = UDim2.new(1, -22, 0.5, -6)
+statusDot.BackgroundColor3 = Color3.fromRGB(80, 0, 0)
+statusDot.ZIndex = 9
+Instance.new("UICorner", statusDot).CornerRadius = UDim.new(1, 0)
+
+-- ===== وظائف تحديث الواجهة =====
+local function UpdateUI()
+    if sbFill then
+        local pct = GRAB_ACTIVE and ((grabTimer / GRAB_RATE) * 100) or 0
+        sbFill.Size = UDim2.new(math.clamp(pct/100, 0, 1), 0, 1, 0)
+        if sbPct then sbPct.Text = math.floor(pct) .. "%" end
+    end
+    if radiusText then radiusText.Text = "📏 " .. GRAB_RADIUS .. "m" end
+    if speedText then speedText.Text = "⚡" .. string.format("%.2f", GRAB_RATE) .. "s" end
+    if statusDot then
+        statusDot.BackgroundColor3 = GRAB_ACTIVE and Color3.fromRGB(0, 255, 0) or Color3.fromRGB(80, 0, 0)
+        TweenService:Create(statusDot, TweenInfo.new(0.2), {
+            BackgroundColor3 = GRAB_ACTIVE and Color3.fromRGB(0, 200, 0) or Color3.fromRGB(80, 0, 0)
+        }):Play()
+    end
+end
+
+-- ===== وظائف السرقة =====
+local function IsOwnPrompt(p)
+    return Char ~= nil and p:IsDescendantOf(Char)
+end
+
+local function GetPromptPos(prompt)
+    local pos
+    pcall(function()
+        local par = prompt.Parent
+        if par:IsA("BasePart") then
+            pos = par.Position
+        elseif par:IsA("Attachment") then
+            pos = par.WorldPosition
+        elseif par:IsA("Model") then
+            local pp = par.PrimaryPart or par:FindFirstChildWhichIsA("BasePart")
+            if pp then pos = pp.Position end
+        else
+            local bp = par:FindFirstChildWhichIsA("BasePart", true)
+            if bp then pos = bp.Position end
+        end
+    end)
+    return pos
+end
+
+local function buildCallbacks(prompt)
+    if stealCache[prompt] then return end
+    local data = { holdCBs = {}, triggerCBs = {}, ready = true }
+    local ok1, c1 = pcall(getconnections, prompt.PromptButtonHoldBegan)
+    if ok1 and type(c1) == "table" then
+        for _, conn in ipairs(c1) do
+            if type(conn.Function) == "function" then
+                table.insert(data.holdCBs, conn.Function)
+            end
+        end
+    end
+    local ok2, c2 = pcall(getconnections, prompt.Triggered)
+    if ok2 and type(c2) == "table" then
+        for _, conn in ipairs(c2) do
+            if type(conn.Function) == "function" then
+                table.insert(data.triggerCBs, conn.Function)
+            end
+        end
+    end
+    if #data.holdCBs > 0 or #data.triggerCBs > 0 then
+        stealCache[prompt] = data
+    end
+end
+
+local function execSteal(prompt)
+    local data = stealCache[prompt]
+    if not data or not data.ready then return false end
+    data.ready = false
+    task.spawn(function()
+        for _, fn in ipairs(data.holdCBs) do task.spawn(fn) end
+        task.wait(0.08)
+        for _, fn in ipairs(data.triggerCBs) do task.spawn(fn) end
+        task.wait(0.01)
+        data.ready = true
+    end)
+    return true
+end
+
+local function firePrompt(prompt)
+    local fired = false
+    pcall(function()
+        if fireproximityprompt then
+            prompt.HoldDuration = 0
+            fireproximityprompt(prompt, 0, 0)
+            fired = true
+        end
+    end)
+    if fired then return end
+    local ok, conns = pcall(getconnections, prompt.Triggered)
+    if ok and type(conns) == "table" then
+        for _, c in ipairs(conns) do
+            if c.Function then task.spawn(c.Function) end
+        end
+        return
+    end
+    pcall(function()
+        prompt:InputHoldBegin()
+        task.delay(0.04, function() pcall(function() prompt:InputHoldEnd() end) end)
+    end)
+end
+
+-- البحث عن أقرب برومبت (محسن)
+local promptCache = {}
+local lastCacheUpdate = 0
+local CACHE_REFRESH = 0.1
+
+local function refreshPromptCache()
+    local now = tick()
+    if now - lastCacheUpdate < CACHE_REFRESH then return promptCache end
+    
+    promptCache = {}
+    local plots = workspace:FindFirstChild("Plots")
+    if not plots then return promptCache end
+    
+    for _, plot in pairs(plots:GetChildren()) do
+        for _, desc in pairs(plot:GetDescendants()) do
+            if desc:IsA("ProximityPrompt") and desc.Enabled and not IsOwnPrompt(desc) then
+                local pos = GetPromptPos(desc)
+                if pos then
+                    table.insert(promptCache, {
+                        prompt = desc,
+                        position = pos,
+                        maxDist = desc.MaxActivationDistance or 10
+                    })
+                end
+            end
+        end
+    end
+    lastCacheUpdate = now
+    return promptCache
+end
+
+local function findNearestPrompt()
+    if not HRP then return nil end
+    
+    local cache = refreshPromptCache()
+    local nearest = nil
+    local bestDist = GRAB_RADIUS
+    local currentPos = HRP.Position
+    
+    for _, item in ipairs(cache) do
+        if item.prompt and item.prompt.Parent and item.prompt.Enabled then
+            local d = (currentPos - item.position).Magnitude
+            if d < bestDist then
+                bestDist = d
+                nearest = item.prompt
+            end
+        end
+    end
+    return nearest
+end
+
+-- ===== تشغيل وإيقاف السرقة =====
+local function StartGrab()
+    if GRAB_ACTIVE then return end
+    GRAB_ACTIVE = true
+    grabTimer = 0
+    UpdateUI()
+    
+    if grabMainConn then grabMainConn:Disconnect() end
+    grabMainConn = RunService.Heartbeat:Connect(function(dt)
+        if not GRAB_ACTIVE then
+            if grabMainConn then grabMainConn:Disconnect(); grabMainConn = nil end
+            UpdateUI()
+            return
+        end
+        if not HRP then return end
+        
+        local bestPrompt = findNearestPrompt()
+        
+        if bestPrompt then
+            grabTimer = grabTimer + dt
+            UpdateUI()
+            if grabTimer >= GRAB_RATE then
+                grabTimer = 0
+                buildCallbacks(bestPrompt)
+                if not execSteal(bestPrompt) then firePrompt(bestPrompt) end
+                UpdateUI()
+            end
+        else
+            if grabTimer > 0 then
+                grabTimer = 0
+                UpdateUI()
+            end
+        end
+    end)
+end
+
+local function StopGrab()
+    GRAB_ACTIVE = false
+    if grabMainConn then grabMainConn:Disconnect(); grabMainConn = nil end
+    grabTimer = 0
+    UpdateUI()
+end
+
+local function ToggleGrab()
+    if GRAB_ACTIVE then StopGrab() else StartGrab() end
+    UpdateUI()
+end
+
+-- ===== الزر الرئيسي =====
+local mainBtn = Instance.new("TextButton", gui)
+mainBtn.Size = UDim2.new(0, 120, 0, 50)
+mainBtn.Position = UDim2.new(0.5, -60, 0.07, 0)
+mainBtn.BackgroundColor3 = Color3.fromRGB(180, 0, 0)
+mainBtn.Text = "⚡ GRAB"
+mainBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+mainBtn.Font = Enum.Font.GothamBold
+mainBtn.TextSize = 20
+mainBtn.Active = true
+mainBtn.Draggable = true
+mainBtn.ZIndex = 10
+Instance.new("UICorner", mainBtn).CornerRadius = UDim.new(0, 12)
+local btnStroke = Instance.new("UIStroke", mainBtn)
+btnStroke.Color = Color3.fromRGB(255, 80, 80)
+btnStroke.Thickness = 2
+
+mainBtn.MouseButton1Click:Connect(function()
+    ToggleGrab()
+    mainBtn.Text = GRAB_ACTIVE and "🔴 STOP" or "⚡ GRAB"
+    mainBtn.BackgroundColor3 = GRAB_ACTIVE and Color3.fromRGB(180, 0, 0) or Color3.fromRGB(80, 0, 0)
+end)
+
+-- ===== لوحة التحكم (أرقام فقط) =====
+local ctrlPanel = Instance.new("Frame", gui)
+ctrlPanel.Size = UDim2.new(0, 240, 0, 160)
+ctrlPanel.Position = UDim2.new(0, 130, 0.07, 0)
+ctrlPanel.BackgroundColor3 = Color3.fromRGB(8, 0, 12)
+ctrlPanel.BackgroundTransparency = 0.1
+ctrlPanel.Visible = false
+ctrlPanel.ZIndex = 15
+Instance.new("UICorner", ctrlPanel).CornerRadius = UDim.new(0, 12)
+Instance.new("UIStroke", ctrlPanel).Color = Color3.fromRGB(255, 50, 50)
+
+-- عنوان اللوحة
+local panelTitle = Instance.new("TextLabel", ctrlPanel)
+panelTitle.Size = UDim2.new(1, 0, 0, 32)
+panelTitle.Position = UDim2.new(0, 0, 0, 0)
+panelTitle.BackgroundColor3 = Color3.fromRGB(20, 0, 25)
+panelTitle.Text = "⚙ CONTROL PANEL"
+panelTitle.TextColor3 = Color3.fromRGB(255, 200, 100)
+panelTitle.Font = Enum.Font.GothamBold
+panelTitle.TextSize = 13
+Instance.new("UICorner", panelTitle).CornerRadius = UDim.new(0, 12)
+
+-- ===== التحكم في المدى =====
+local rangeLabel = Instance.new("TextLabel", ctrlPanel)
+rangeLabel.Size = UDim2.new(0.45, 0, 0, 30)
+rangeLabel.Position = UDim2.new(0, 12, 0, 42)
+rangeLabel.BackgroundTransparency = 1
+rangeLabel.Text = "📏 RANGE (m):"
+rangeLabel.TextColor3 = Color3.fromRGB(255, 220, 220)
+rangeLabel.Font = Enum.Font.GothamBold
+rangeLabel.TextSize = 12
+
+local rangeInput = Instance.new("TextBox", ctrlPanel)
+rangeInput.Size = UDim2.new(0, 80, 0, 30)
+rangeInput.Position = UDim2.new(0.55, 0, 0, 42)
+rangeInput.BackgroundColor3 = Color3.fromRGB(15, 0, 20)
+rangeInput.Text = tostring(GRAB_RADIUS)
+rangeInput.TextColor3 = Color3.fromRGB(255, 200, 100)
+rangeInput.Font = Enum.Font.GothamBold
+rangeInput.TextSize = 14
+rangeInput.ClearTextOnFocus = false
+Instance.new("UICorner", rangeInput).CornerRadius = UDim.new(0, 8)
+local rangeStroke = Instance.new("UIStroke", rangeInput)
+rangeStroke.Color = Color3.fromRGB(255, 50, 50)
+
+-- ===== التحكم في السرعة =====
+local speedLabel = Instance.new("TextLabel", ctrlPanel)
+speedLabel.Size = UDim2.new(0.45, 0, 0, 30)
+speedLabel.Position = UDim2.new(0, 12, 0, 82)
+speedLabel.BackgroundTransparency = 1
+speedLabel.Text = "⚡ SPEED (s):"
+speedLabel.TextColor3 = Color3.fromRGB(255, 220, 220)
+speedLabel.Font = Enum.Font.GothamBold
+speedLabel.TextSize = 12
+
+local speedInput = Instance.new("TextBox", ctrlPanel)
+speedInput.Size = UDim2.new(0, 80, 0, 30)
+speedInput.Position = UDim2.new(0.55, 0, 0, 82)
+speedInput.BackgroundColor3 = Color3.fromRGB(15, 0, 20)
+speedInput.Text = string.format("%.2f", GRAB_RATE)
+speedInput.TextColor3 = Color3.fromRGB(255, 200, 100)
+speedInput.Font = Enum.Font.GothamBold
+speedInput.TextSize = 14
+speedInput.ClearTextOnFocus = false
+Instance.new("UICorner", speedInput).CornerRadius = UDim.new(0, 8)
+local speedStroke = Instance.new("UIStroke", speedInput)
+speedStroke.Color = Color3.fromRGB(255, 50, 50)
+
+-- ===== أزرار التحكم =====
+-- زر إعادة تشغيل
+local restartBtn = Instance.new("TextButton", ctrlPanel)
+restartBtn.Size = UDim2.new(0.45, -10, 0, 32)
+restartBtn.Position = UDim2.new(0, 10, 0, 122)
+restartBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+restartBtn.Text = "🔄 RESTART"
+restartBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+restartBtn.Font = Enum.Font.GothamBold
+restartBtn.TextSize = 11
+Instance.new("UICorner", restartBtn).CornerRadius = UDim.new(0, 8)
+
+-- زر إخفاء الشريط
+local hideBarBtn = Instance.new("TextButton", ctrlPanel)
+hideBarBtn.Size = UDim2.new(0.45, -10, 0, 32)
+hideBarBtn.Position = UDim2.new(0.55, 0, 0, 122)
+hideBarBtn.BackgroundColor3 = Color3.fromRGB(30, 30, 50)
+hideBarBtn.Text = "👁 HIDE BAR"
+hideBarBtn.TextColor3 = Color3.fromRGB(255, 255, 255)
+hideBarBtn.Font = Enum.Font.GothamBold
+hideBarBtn.TextSize = 11
+Instance.new("UICorner", hideBarBtn).CornerRadius = UDim.new(0, 8)
+
+-- زر إغلاق اللوحة
+local closePanelBtn = Instance.new("TextButton", ctrlPanel)
+closePanelBtn.Size = UDim2.new(0.45, -10, 0, 32)
+closePanelBtn.Position = UDim2.new(0.55, 0, 0, 122)
+closePanelBtn.BackgroundColor3 = Color3.fromRGB(50, 30, 30)
+closePanelBtn.Text = "✕ CLOSE"
+closePanelBtn.TextColor3 = Color3.fromRGB(255, 100, 100)
+closePanelBtn.Font = Enum.Font.GothamBold
+closePanelBtn.TextSize = 11
+Instance.new("UICorner", closePanelBtn).CornerRadius = UDim.new(0, 8)
+closePanelBtn.Visible = false
+
+-- ===== وظائف التحكم بالأرقام =====
+rangeInput.FocusLost:Connect(function()
+    local val = tonumber(rangeInput.Text)
+    if val and val >= 5 and val <= 100 then
+        GRAB_RADIUS = val
+        rangeInput.Text = tostring(GRAB_RADIUS)
+        UpdateUI()
+    else
+        rangeInput.Text = tostring(GRAB_RADIUS)
+    end
+end)
+
+speedInput.FocusLost:Connect(function()
+    local val = tonumber(speedInput.Text)
+    if val and val >= 0.05 and val <= 1 then
+        GRAB_RATE = val
+        speedInput.Text = string.format("%.2f", GRAB_RATE)
+        UpdateUI()
+    else
+        speedInput.Text = string.format("%.2f", GRAB_RATE)
+    end
+end)
+
+-- الضغط على Enter لحفظ القيم
+rangeInput.Focused:Connect(function()
+    rangeInput.Text = tostring(GRAB_RADIUS)
+end)
+
+speedInput.Focused:Connect(function()
+    speedInput.Text = string.format("%.2f", GRAB_RATE)
+end)
+
+-- أزرار اللوحة
+restartBtn.MouseButton1Click:Connect(function()
+    if GRAB_ACTIVE then
+        StopGrab()
+        task.wait(0.1)
+        StartGrab()
+    end
+    UpdateUI()
+end)
+
+hideBarBtn.MouseButton1Click:Connect(function()
+    stealBarVisible = not stealBarVisible
+    stealBarFrame.Visible = stealBarVisible
+    hideBarBtn.Text = stealBarVisible and "👁 HIDE BAR" or "👁‍🗨 SHOW BAR"
+end)
+
+closePanelBtn.MouseButton1Click:Connect(function()
+    ctrlPanel.Visible = false
+end)
+
+-- ===== زر فتح لوحة التحكم =====
+local settingsBtn = Instance.new("TextButton", gui)
+settingsBtn.Size = UDim2.new(0, 50, 0, 50)
+settingsBtn.Position = UDim2.new(0, 15, 0.07, 0)
+settingsBtn.BackgroundColor3 = Color3.fromRGB(15, 0, 20)
+settingsBtn.Text = "⚙"
+settingsBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+settingsBtn.Font = Enum.Font.GothamBold
+settingsBtn.TextSize = 26
+settingsBtn.Draggable = true
+settingsBtn.ZIndex = 10
+Instance.new("UICorner", settingsBtn).CornerRadius = UDim.new(1, 0)
+Instance.new("UIStroke", settingsBtn).Color = Color3.fromRGB(255, 50, 50)
+
+settingsBtn.MouseButton1Click:Connect(function()
+    ctrlPanel.Visible = not ctrlPanel.Visible
+end)
+
+-- ===== زر إخفاء الشريط السريع =====
+local quickHideBtn = Instance.new("TextButton", gui)
+quickHideBtn.Size = UDim2.new(0, 40, 0, 40)
+quickHideBtn.Position = UDim2.new(1, -55, 0.07, 0)
+quickHideBtn.BackgroundColor3 = Color3.fromRGB(15, 0, 20)
+quickHideBtn.Text = "👁"
+quickHideBtn.TextColor3 = Color3.fromRGB(255, 200, 100)
+quickHideBtn.Font = Enum.Font.GothamBold
+quickHideBtn.TextSize = 20
+quickHideBtn.Draggable = true
+quickHideBtn.ZIndex = 10
+Instance.new("UICorner", quickHideBtn).CornerRadius = UDim.new(1, 0)
+Instance.new("UIStroke", quickHideBtn).Color = Color3.fromRGB(255, 50, 50)
+
+quickHideBtn.MouseButton1Click:Connect(function()
+    stealBarVisible = not stealBarVisible
+    stealBarFrame.Visible = stealBarVisible
+    quickHideBtn.Text = stealBarVisible and "👁" or "👁‍🗨"
+end)
+
+-- ===== مفاتيح التشغيل السريع =====
+UserInputService.InputBegan:Connect(function(input, gpe)
+    if gpe then return end
+    
+    if input.KeyCode == Enum.KeyCode.RightControl then
+        ToggleGrab()
+        mainBtn.Text = GRAB_ACTIVE and "🔴 STOP" or "⚡ GRAB"
+        mainBtn.BackgroundColor3 = GRAB_ACTIVE and Color3.fromRGB(180, 0, 0) or Color3.fromRGB(80, 0, 0)
+        UpdateUI()
+    end
+    
+    if input.KeyCode == Enum.KeyCode.R then
+        if GRAB_ACTIVE then
+            StopGrab()
+            task.wait(0.05)
+            StartGrab()
+        end
+        UpdateUI()
+    end
+    
+    if input.KeyCode == Enum.KeyCode.C then
+        ctrlPanel.Visible = not ctrlPanel.Visible
+    end
+end)
+
+-- ===== إعادة التشغيل عند تغيير الشخصية =====
+LP.CharacterAdded:Connect(function(c)
+    task.wait(0.5)
+    Setup(c)
+    if GRAB_ACTIVE then
+        StopGrab()
+        task.wait(0.1)
+        StartGrab()
+    end
+end)
+
+UpdateUI()
+print("✅ أفضل أوتو قراب V3 | تحكم كامل بالأرقام فقط")
+print("🎮 المفاتيح: RightControl = تشغيل/إيقاف | R = إعادة تشغيل | C = لوحة التحكم")
+print("📝 يمكنك كتابة الرقم مباشرة في حقل RANGE و SPEED") انتظر ابعتلك السحربت الي راح تضيف عليه هاد الاوتو قراب
