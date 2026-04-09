@@ -774,8 +774,8 @@ end
 -- Silent Duels coordinates
 local L1 = Vector3.new(-474.7, -5.9, 91.0)
 local L2 = Vector3.new(-483.4, -3.9, 97.3)
-local L_END = Vector3.new(-476.1, -5.5, 25.4)
-local R1 = Vector3.new(-470.6, -5.9, 34.4)
+local L_END = Vector3.new(-476, -7, 15)
+local R1 = Vector3.new(-476, -7, 27)
 local R2 = Vector3.new(-484.2, -3.9, 21.4)
 local R_END = Vector3.new(-473.4, -5.9, 111)
 
